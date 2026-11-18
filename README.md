@@ -1,3 +1,3 @@
 # deriv-over-under-analyzer
 Live Deriv Volatility Indices Over/Under 4 Analyzer using the last 100 ticks.
- /scanner.html
+
