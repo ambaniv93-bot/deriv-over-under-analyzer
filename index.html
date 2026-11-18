@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Deriv Over Under Analyzer</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#10141e;color:white;font-family:Arial,sans-serif;padding:18px}
+h2{color:#20d6a1;text-align:center}
+.card{background:#1c2535;padding:17px;border-radius:14px;margin:14px 0}
+select,button{width:100%;padding:13px;border-radius:8px;border:0;margin-top:10px;font-size:16px}
+button{background:#20d6a1;color:#07130f;font-weight:bold}
+.stat{display:flex;justify-content:space-between;padding:10px 0;border-bottom:1px solid #354052}
+.green{color:#20d6a1}
+.red{color:#ff6464}
+#status{color:#ffca58}
+#digits{font-size:22px;letter-spacing:5px;word-break:break-all}
+.signal{text-align:center;font-size:25px;font-weight:bold;padding:15px}
+small{color:#aeb8c8}
+</style>
+</head>
+<body>
+
+<h2>DERIV LIVE ANALYZER</h2>
+<p style="text-align:center">Over 4 / Under 4 | Last 100 Ticks</p>
+
+<div class="card">
+<label>Select Volatility Market</label>
+<select id="market">
+<option value="1HZ10V">Volatility 10 (1s)</option>
+<option value="1HZ25V">Volatility 25 (1s)</option>
+<option value="1HZ50V">Volatility 50 (1s)</option>
+<option value="1HZ75V">Volatility 75 (1s)</option>
+<option value="1HZ100V">Volatility 100 (1s)</option>
+<option value="R_10">Volatility 10</option>
+<option value="R_25">Volatility 25</option>
+<option value="R_50">Volatility 50</option>
+<option value="R_75">Volatility 75</option>
+<option value="R_100">Volatility 100</option>
+</select>
+<button onclick="connect()">CONNECT LIVE MARKET</button>
+<p id="status">Disconnected</p>
+</div>
+
+<div class="card">
+<div class="stat"><span>Market</span><b id="selected">--</b></div>
+<div class="stat"><span>Ticks collected</span><b id="total">0 / 100</b></div>
+<div class="stat"><span>Over 4 (5-9)</span><b id="over">0</b></div>
+<div class="stat"><span>Under 4 (0-3)</span><b id="under">0</b></div>
+<div class="stat"><span>Digit 4</span><b id="four">0</b></div>
+</div>
+
+<div class="card">
+<h3>LIVE ANALYSIS</h3>
+<div class="stat"><span>Over 4 frequency</span><b id="op">--</b></div>
+<div class="stat"><span>Under 4 frequency</span><b id="up">--</b></div>
+<div class="signal" id="signal">WAITING...</div>
+<p id="reason">Collecting market data.</p>
+</div>
+
+<div class="card">
+<h3>LAST 100 DIGITS</h3>
+<div id="digits">Waiting for ticks...</div>
+</div>
+
+<div class="card">
+<h3>IMPORTANT</h3>
+<small>This tool reads live market data and calculates historical digit frequencies. Its signals are experimental statistical observations, not guaranteed predictions. It does not execute trades. Test on a demo account first.</small>
+</div>
+
+<script>
+let ws;
+let digits=[];
+let pipSize=2;
+
+function getDigit(price,pip){
+  let fixed=Number(price).toFixed(pip);
+  return Number(fixed.replace(".","").slice(-1));
+}
+
+function connect(){
+  if(ws) ws.close();
+
+  digits=[];
+  update();
+  document.getElementById("status").textContent="Connecting...";
+  document.getElementById("signal").textContent="WAITING...";
+
+  const symbol=document.getElementById("market").value;
+  document.getElementById("selected").textContent=symbol;
+
+  ws=new WebSocket(
+    "wss://api.derivws.com/trading/v1/options/ws/public"
+  );
+
+  ws.onopen=()=>{
+    document.getElementById("status").textContent="LIVE CONNECTED";
+    ws.send(JSON.stringify({
+      ticks_history:symbol,
+      count:100,
+      end:"latest",
+      style:"ticks"
+    }));
+    ws.send(JSON.stringify({
+      ticks:symbol,
+      subscribe:1
+    }));
+  };
+
+  ws.onmessage=(event)=>{
+    const data=JSON.parse(event.data);
+
+    if(data.error){
+      document.getElementById("status").textContent=
+        "Error: "+data.error.message;
+      return;
+    }
+
+    if(data.msg_type==="history" && data.history){
+      pipSize=data.pip_size ?? pipSize;
+      digits=data.history.prices.map(
+        price=>getDigit(price,pipSize)
+      ).slice(-100);
+      update();
+    }
+
+    if(data.msg_type==="tick" && data.tick){
+      pipSize=data.tick.pip_size ?? pipSize;
+      const digit=getDigit(data.tick.quote,pipSize);
+      digits.push(digit);
+      if(digits.length>100) digits.shift();
+      update();
+    }
+  };
+
+  ws.onerror=()=>{
+    document.getElementById("status").textContent="Connection error";
+  };
+
+  ws.onclose=()=>{
+    document.getElementById("status").textContent="Disconnected";
+  };
+}
+
+function update(){
+  const over=digits.filter(d=>d>4).length;
+  const under=digits.filter(d=>d<4).length;
+  const four=digits.filter(d=>d===4).length;
+  const n=digits.length;
+
+  document.getElementById("total").textContent=n+" / 100";
+  document.getElementById("over").textContent=over;
+  document.getElementById("under").textContent=under;
+  document.getElementById("four").textContent=four;
+
+  document.getElementById("op").textContent=
+    n ? (over/n*100).toFixed(1)+"%" : "--";
+  document.getElementById("up").textContent=
+    n ? (under/n*100).toFixed(1)+"%" : "--";
+
+  document.getElementById("digits").textContent=
+    digits.join(" ");
+
+  const signal=document.getElementById("signal");
+  const reason=document.getElementById("reason");
+
+  if(n<100){
+    signal.textContent="COLLECTING DATA";
+    signal.className="signal";
+    reason.textContent="Waiting for 100 ticks before analysis.";
+    return;
+  }
+
+  const difference=Math.abs(over-under)/n*100;
+
+  if(difference<10){
+    signal.textContent="NO CLEAR EDGE";
+    signal.className="signal";
+    reason.textContent="Over and Under frequencies are close.";
+  }else if(over>under){
+    signal.textContent="OVER 4 BIAS";
+    signal.className="signal green";
+    reason.textContent=
+      "Over 4 appeared more often in this sample. This is not a prediction.";
+  }else{
+    signal.textContent="UNDER 4 BIAS";
+    signal.className="signal red";
+    reason.textContent=
+      "Under 4 appeared more often in this sample. This is not a prediction.";
+  }
+}
+</script>
+</body>
+</html>
