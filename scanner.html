@@ -1,0 +1,320 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deriv Eye Scanner 2.0</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;padding:18px;background:#08111f;color:#eef4ff;font-family:Arial,sans-serif}
+header h1{color:#43d9ff;font-size:25px}
+p{color:#aab8ca;line-height:1.5}
+.panel{background:#132137;border:1px solid #2a3c56;border-radius:13px;padding:15px;margin:14px 0}
+button{background:#13b8a6;color:#06201e;border:0;border-radius:8px;padding:12px 18px;font-weight:bold}
+.status{color:#f6c76b}
+.good{color:#42dfad}
+.bad{color:#ff8088}
+.market{display:inline-block;background:#20334d;border-radius:8px;padding:9px;margin:4px;font-size:12px}
+.big{font-size:24px;font-weight:bold;color:#43d9ff}
+.tablewrap{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-size:12px}
+th,td{padding:10px 7px;text-align:left;border-bottom:1px solid #30415a}
+th{color:#43d9ff}
+small{color:#9eacc3}
+</style>
+</head>
+<body>
+<header>
+<h1>DERIV EYE SCANNER 2.0</h1>
+<p>Live market analysis · 10 Volatility Indices · Last 100 ticks</p>
+</header>
+
+<div class="panel">
+<p>Connection: <b id="connection" class="status">Connecting...</b></p>
+<p id="message">Preparing market scanner...</p>
+<button onclick="connect()">RECONNECT / SCAN</button>
+</div>
+
+<div class="panel">
+<small>BEST STATISTICAL CANDIDATE</small>
+<div id="best" class="big">Collecting data...</div>
+<p id="reason">Waiting for market history.</p>
+</div>
+
+<div class="panel">
+<h3>Live markets</h3>
+<div id="markets"></div>
+</div>
+
+<div class="panel">
+<h3>Over / Under analysis</h3>
+<p>All eligible barriers are evaluated using observed digit frequencies.</p>
+<div class="tablewrap">
+<table>
+<thead>
+<tr><th>Market</th><th>Contract</th><th>Observed</th><th>Baseline</th><th>Score</th><th>Result</th></tr>
+</thead>
+<tbody id="results">
+<tr><td colspan="6">Waiting for data...</td></tr>
+</tbody>
+</table>
+</div>
+</div>
+
+<div class="panel">
+<h3>Risk warning</h3>
+<p>This scanner provides statistical observations, not guaranteed predictions. A candidate is not a promise of a winning trade. Test on a demo account and record actual results before risking money.</p>
+</div>
+
+<script>
+const APP_ID = "1089";
+
+const SYMBOLS = [
+"R_10","R_25","R_50","R_75","R_100",
+"1HZ10V","1HZ25V","1HZ50V","1HZ75V","1HZ100V"
+];
+
+let socket = null;
+let markets = {};
+let requestIds = {};
+let nextId = 1;
+
+SYMBOLS.forEach(symbol => {
+ markets[symbol] = {
+  digits:[],
+  pipSize:2,
+  ready:false,
+  error:""
+ };
+});
+
+function lastDigit(price,pipSize){
+ const formatted = Number(price).toFixed(pipSize);
+ const digits = formatted.replace(/\D/g,"");
+ return Number(digits.slice(-1));
+}
+
+function status(message,good=false){
+ const el=document.getElementById("connection");
+ el.textContent=message;
+ el.className=good?"good":"status";
+}
+
+function connect(){
+ if(socket){
+  try{socket.close()}catch(e){}
+ }
+
+ SYMBOLS.forEach(s=>{
+  markets[s].digits=[];
+  markets[s].ready=false;
+  markets[s].error="";
+ });
+
+ status("Connecting...");
+ document.getElementById("message").textContent="Requesting 100 ticks from each market...";
+
+ socket=new WebSocket(
+  "wss://ws.derivws.com/websockets/v3?app_id="+APP_ID
+ );
+
+ socket.onopen=()=>{
+  status("Connected",true);
+
+  SYMBOLS.forEach(symbol=>{
+   const id=nextId++;
+   requestIds[id]=symbol;
+
+   socket.send(JSON.stringify({
+    ticks_history:symbol,
+    count:100,
+    end:"latest",
+    style:"ticks",
+    req_id:id
+   }));
+  });
+
+  renderMarkets();
+ };
+
+ socket.onmessage=event=>{
+  const data=JSON.parse(event.data);
+
+  if(data.error){
+   const symbol=requestIds[data.req_id];
+   if(symbol){
+    markets[symbol].error=data.error.message;
+    delete requestIds[data.req_id];
+    renderMarkets();
+   }
+   return;
+  }
+
+  if(data.msg_type==="history"){
+   const symbol=requestIds[data.req_id];
+   if(!symbol)return;
+
+   const state=markets[symbol];
+   state.pipSize=Number.isInteger(data.pip_size)?data.pip_size:2;
+   state.digits=data.history.prices.map(
+    price=>lastDigit(price,state.pipSize)
+   );
+   state.ready=state.digits.length>=100;
+   delete requestIds[data.req_id];
+
+   const subId=nextId++;
+   socket.send(JSON.stringify({
+    ticks:symbol,
+    subscribe:1,
+    req_id:subId
+   }));
+
+   renderAll();
+  }
+
+  if(data.msg_type==="tick" && data.tick){
+   const symbol=data.tick.symbol;
+   const state=markets[symbol];
+   if(!state)return;
+
+   if(Number.isInteger(data.tick.pip_size)){
+    state.pipSize=data.tick.pip_size;
+   }
+
+   state.digits.push(
+    lastDigit(data.tick.quote,state.pipSize)
+   );
+
+   if(state.digits.length>100)state.digits.shift();
+   state.ready=state.digits.length>=100;
+   renderAll();
+  }
+ };
+
+ socket.onerror=()=>{
+  status("Connection error");
+  document.getElementById("message").textContent=
+   "Connection failed. Check internet and app ID.";
+ };
+
+ socket.onclose=()=>status("Disconnected");
+}
+
+function stats(digits,direction,barrier){
+ const n=digits.length;
+ if(!n)return null;
+
+ const wins=digits.filter(d=>
+  direction==="OVER"?d>barrier:d<barrier
+ ).length;
+
+ const rate=wins/n;
+ const baseline=direction==="OVER"
+  ?(9-barrier)/10
+  :barrier/10;
+
+ const se=Math.sqrt(baseline*(1-baseline)/n);
+ const z=se>0?(rate-baseline)/se:0;
+
+ return {rate,baseline,z};
+}
+
+function makeRow(symbol,direction,barrier){
+ const digits=markets[symbol].digits;
+ const a=stats(digits,direction,barrier);
+ const b=stats(digits.slice(-50),direction,barrier);
+ const c=stats(digits.slice(-25),direction,barrier);
+
+ const supported=
+  b.rate>a.baseline && c.rate>a.baseline;
+
+ return {
+  symbol,
+  contract:direction+" "+barrier,
+  rate:a.rate,
+  baseline:a.baseline,
+  score:a.z,
+  passes:a.z>=1.5 && supported
+ };
+}
+
+function analyse(){
+ const rows=[];
+
+ SYMBOLS.forEach(symbol=>{
+  if(!markets[symbol].ready)return;
+
+  for(let barrier=0;barrier<=8;barrier++){
+   rows.push(makeRow(symbol,"OVER",barrier));
+  }
+
+  for(let barrier=1;barrier<=9;barrier++){
+   rows.push(makeRow(symbol,"UNDER",barrier));
+  }
+ });
+
+ return rows.sort((a,b)=>b.score-a.score);
+}
+
+function renderMarkets(){
+ document.getElementById("markets").innerHTML=
+ SYMBOLS.map(symbol=>{
+  const m=markets[symbol];
+  const label=m.error?"Error":m.ready?"LIVE 100/100":
+   "Loading "+m.digits.length+"/100";
+  return `<span class="market">${symbol}<br>${label}</span>`;
+ }).join("");
+}
+
+function renderAll(){
+ renderMarkets();
+
+ const ready=SYMBOLS.filter(s=>markets[s].ready).length;
+ document.getElementById("message").textContent=
+ ready+" of 10 markets ready.";
+
+ const rows=analyse();
+
+ if(ready<10){
+  document.getElementById("best").textContent="COLLECTING DATA";
+  document.getElementById("reason").textContent=
+   "Waiting for all markets to load.";
+ }else{
+  const best=rows.find(r=>r.passes);
+
+  if(best){
+   document.getElementById("best").textContent=
+    best.symbol+" · "+best.contract;
+
+   document.getElementById("reason").textContent=
+    "Observed "+(best.rate*100).toFixed(1)+
+    "% · Baseline "+(best.baseline*100).toFixed(1)+
+    "% · Score "+best.score.toFixed(2)+
+    ". Statistical candidate only.";
+  }else{
+   document.getElementById("best").textContent="NO TRADE";
+   document.getElementById("reason").textContent=
+    "No setup currently meets the selected filters.";
+  }
+ }
+
+ document.getElementById("results").innerHTML=rows.length
+ ?rows.slice(0,30).map(r=>`
+  <tr>
+   <td>${r.symbol}</td>
+   <td>${r.contract}</td>
+   <td>${(r.rate*100).toFixed(1)}%</td>
+   <td>${(r.baseline*100).toFixed(1)}%</td>
+   <td>${r.score.toFixed(2)}</td>
+   <td class="${r.passes?'good':'bad'}">${r.passes?'Candidate':'Wait'}</td>
+  </tr>
+ `).join("")
+ :'<tr><td colspan="6">Waiting for 100 ticks per market...</td></tr>';
+}
+
+connect();
+</script>
+</body>
+  </html>
+  
